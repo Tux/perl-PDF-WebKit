@@ -79,12 +79,8 @@ sub _executable {
   my $self = shift;
   my $default = $self->configuration->wkhtmltopdf;
   return $default if $default !~ /^\//; # it's not a path, so nothing we can do
-  if (-e $default) {
-    return $default;
-  }
-  else {
-    return (split(/\//, $default))[-1];
-  }
+  return $default if -e $default;
+  return (split(/\//, $default))[-1];
 }
 
 sub to_pdf {
@@ -96,9 +92,34 @@ sub to_pdf {
 
   my $input = $self->source->is_html ? $self->source->content : undef;
   my $output;
+  my $temp_fn;
+  if (!defined $input and @args > 3 and -f $args[-2] and my $enc = $self->{options}{"--encoding"}) {
+    # interestingly, wkhtmltopdf 0.12.4 does not know about --encoding
+    my $meta = '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">';
+    use File::Temp;
+    (undef, $temp_fn) = File::Temp::tempfile ("tmpwkXXXXX", SUFFIX => ".html", OPEN => 0, UNLINK => 1);
+    if (open my $fhi, "<:encoding($enc)",  $args[-2] and
+        open my $fho, ">:encoding(utf-8)", $temp_fn) {
+      local $/;
+      my $in = <$fhi>;
+      my ($head) = $in =~ m{<head>(.*?)</head>}is;
+      if (!$head) {
+	$in =~ s{(?=<body>)}{<head>$meta</head>}i;
+      }
+      elsif ($head !~ m{charset=}) {
+	$in =~ s{(?<=<head>)}{$meta}i;
+      }
+      print $fho $in;
+      close $fhi;
+      close $fho;
+      $args[-2] = $temp_fn;
+    }
+  }
 
   my %opt = map +( "binmode_std$_" => ":raw" ), "in", "out", "err";
   run3 \@args, \$input, \$output, \my $err, \%opt;
+
+  $temp_fn && -f $temp_fn and unlink $temp_fn; # UNLINK not effective on OPEN => 0
 
   if ($path) {
     $output = do { local (@ARGV,$/) = ($path); <> };
@@ -145,6 +166,10 @@ sub _pdf_webkit_meta_tags {
   );
 
   my $parser = XML::LibXML->new();
+  my $enc = $self->{options}{encoding};
+  if ($enc) {
+    $options{encoding} = $enc;
+  }
   my $doc = $source->is_html ? $parser->parse_html_string($source->content,\%options)
           : $source->is_file ? $parser->parse_html_file($source->string,\%options)
           : return ();
